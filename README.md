@@ -66,6 +66,23 @@ co.eci.snake
 
 > Objetivo didáctico: practicar suspensión/continuación **sin** espera activa y consolidar el modelo de monitores en Java.
 
+
+para esta parte primero nos damso cuenta que debemos tener una clase la cual sea como la mediadora entre los hilos, de esta forma
+se lograria tener una variable mutable general para todos los hilos ya que nos piden pausar todos los hilos.
+
+![alt text](image.png)
+
+por medio de esta clase, se quedara en un bucle hsata que se imprima  los numeros primos que se han encontrado
+
+![alt text](image-1.png)
+
+como se ve en esta calse que es  control.java, la cual maneja la pausa con el metodo de pauseControl.pause(); y quita la pausa con pauseControl.resume();
+todo esto en un bucle hasta que todos los hilos hallan termiando
+
+tambien tuvimos en cuenta que la clase pausecontrol, cada uno de sus metodos tuvieran el  synchronized ya que con este vamos hacer que en halla una comunicion 
+entre los hilos debido a que esto es nativo de java
+
+
 ---
 
 ## Parte II — SnakeRace concurrente (núcleo del laboratorio)
