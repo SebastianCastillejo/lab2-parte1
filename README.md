@@ -67,21 +67,129 @@ co.eci.snake
 > Objetivo didáctico: practicar suspensión/continuación **sin** espera activa y consolidar el modelo de monitores en Java.
 
 
-para esta parte primero nos damso cuenta que debemos tener una clase la cual sea como la mediadora entre los hilos, de esta forma
-se lograria tener una variable mutable general para todos los hilos ya que nos piden pausar todos los hilos.
+### Diseño de sincronización
 
-![alt text](image.png)
+Para pausar todos los hilos a la vez se creó la clase `PauseControl`, que actúa
+como **monitor compartido**: una única instancia que `Control` crea y entrega por
+constructor a los tres `PrimeFinderThread`. Esto es indispensable, porque `wait()`
+y `notifyAll()` solo se comunican entre sí si todos los hilos los invocan **sobre
+el mismo objeto**. Los trabajadores no se conocen entre ellos; todos hablan con
+este intermediario.
 
-por medio de esta clase, se quedara en un bucle hsata que se imprima  los numeros primos que se han encontrado
+![PauseControl](image.png)
 
-![alt text](image-1.png)
+**Qué lock se usa:** el monitor intrínseco de la única instancia de `PauseControl`.
+Al ser los tres métodos `synchronized` de instancia, el lock es `this`; y como solo
+existe un objeto, existe un solo lock.
 
-como se ve en esta calse que es  control.java, la cual maneja la pausa con el metodo de pauseControl.pause(); y quita la pausa con pauseControl.resume();
-todo esto en un bucle hasta que todos los hilos hallan termiando
+**Cuál es la condición:** el atributo `private boolean paused`. Es privado y solo se
+lee o escribe dentro de métodos `synchronized`, por lo que no necesita ser `volatile`:
+`synchronized` ya garantiza exclusión mutua **y** visibilidad entre hilos (relación
+*happens-before*).
 
-tambien tuvimos en cuenta que la clase pausecontrol, cada uno de sus metodos tuvieran el  synchronized ya que con este vamos hacer que en halla una comunicion 
-entre los hilos debido a que esto es nativo de java
+**Cómo se evitan los lost wakeups:** la verificación de la condición y la llamada a
+`wait()` ocurren dentro del mismo bloque sincronizado. Si el flag se leyera fuera del
+lock, `Control` podría cambiarlo y notificar justo entre la verificación y el `wait()`,
+dejando al hilo dormido tras una señal que ya pasó. Además se usa `while (paused)` y
+no `if (paused)`, porque `wait()` puede retornar sin que nadie haya notificado
+(*spurious wakeup*) y porque `notifyAll()` despierta a los tres hilos a la vez, de modo
+que cada uno debe reevaluar la condición por su cuenta.
 
+**Por qué `notifyAll()` y no `notify()`:** hay tres hilos esperando sobre el mismo
+monitor. `notify()` despertaría solo a uno arbitrario y los otros dos quedarían
+dormidos indefinidamente.
+
+### Flujo de ejecución
+
+`Control` deja de ser un hilo que muere tras arrancar a los trabajadores y pasa a ser
+un supervisor con su propio ciclo:
+
+![Control](image-1.png)
+
+1. Duerme `TMILISECONDS` (5000 ms).
+2. Llama a `pauseControl.pause()`, que **solo levanta la bandera y retorna al instante**.
+   La pausa no es inmediata: cada trabajador se detiene por su cuenta cuando llega a su
+   siguiente llamada a `awaitIfPaused()`. Es como poner un semáforo en rojo: el cambio es
+   instantáneo, pero los carros frenan cuando llegan a él.
+3. Con los tres hilos ya dormidos, lee y reporta cuántos primos lleva cada uno.
+4. Se bloquea en `Scanner.nextLine()` esperando el ENTER.
+5. Llama a `pauseControl.resume()`, que pone `paused = false` **y** ejecuta `notifyAll()`.
+   Cambiar el estado no basta: un hilo dormido en `wait()` no se entera solo de que el
+   flag cambió.
+
+El ciclo termina cuando `workersActivos()` detecta que los tres hilos ya recorrieron su rango.
+
+### Ausencia de espera activa
+
+No hay *busy-waiting* en ningún punto del programa:
+
+- Los trabajadores pausados están bloqueados en `wait()`, fuera de la cola de ejecución
+  del sistema operativo (0% de CPU).
+- `Control`, entre pausas, está bloqueado en `Thread.sleep()`.
+- `Control`, esperando el ENTER, está bloqueado leyendo `System.in`.
+
+En ningún lado existe un `while (paused) { }` girando en vacío.
+
+### Colección no segura corregida
+
+`PrimeFinderThread.primes` era un `LinkedList` que el hilo trabajador escribe y que
+`Control` lee con `.size()` al pausar: una condición de carrera. Se sustituyó por
+`Collections.synchronizedList(new LinkedList<>())`.
+
+Adicionalmente se actualizó el `pom.xml` de `1.7` a `maven.compiler.release 21`, ya que
+JDK 21 no admite compilar para Java 7.
+
+### Ejecución
+
+El proyecto de la Parte I quedó incluido en este mismo repositorio, en la carpeta
+`wait-notify-excercise/`:
+
+```bash
+cd wait-notify-excercise
+mvn -q compile exec:java
+```
+
+Se usa `compile exec:java` y no solo `exec:java`, porque `exec:java` es un *goal*
+suelto que no dispara el ciclo de vida de Maven: ejecuta lo que encuentre en
+`target/classes` y falla con `ClassNotFoundException` si el proyecto no se ha
+compilado antes.
+
+Salida obtenida (se presiona ENTER en cada pausa):
+
+```
+=== PAUSA ===
+  Hilo 0: 664579 primos
+  Hilo 1: 399951 primos
+  Hilo 2: 311830 primos
+  TOTAL: 1376360 primos
+Presione ENTER para reanudar...
+
+=== PAUSA ===
+  Hilo 0: 664579 primos
+  Hilo 1: 606028 primos
+  Hilo 2: 563139 primos
+  TOTAL: 1833746 primos
+Presione ENTER para reanudar...
+
+=== PAUSA ===
+  Hilo 0: 664579 primos
+  Hilo 1: 606028 primos
+  Hilo 2: 587252 primos
+  TOTAL: 1857859 primos
+Presione ENTER para reanudar...
+
+Busqueda terminada.
+```
+
+El total final es **1.857.859 primos**, que coincide con π(3×10⁷), el número real de
+primos menores a 30.000.000; esto confirma que la pausa y la reanudación no alteran ni
+pierden resultados.
+
+Nótese que el Hilo 0 se congela en 664.579 = π(10⁷) desde la primera pausa: ya terminó
+su rango. Un hilo terminado está muerto, no dormido, así que deja de consultar el
+monitor y su contador no vuelve a cambiar. También se observa que cada hilo encuentra
+menos primos que el anterior, porque los primos se vuelven más escasos entre números
+grandes, no porque un hilo trabaje más lento.
 
 ---
 
