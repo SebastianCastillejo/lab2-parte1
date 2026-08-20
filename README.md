@@ -195,6 +195,8 @@ grandes, no porque un hilo trabaje más lento.
 ---
 
 ## Parte II — SnakeRace concurrente (núcleo del laboratorio)
+<img width="876" height="826" alt="image" src="https://github.com/user-attachments/assets/8ce0dc09-f621-49e7-b410-36018beefd6c" />
+
 
 ### 1) Análisis de concurrencia
 
