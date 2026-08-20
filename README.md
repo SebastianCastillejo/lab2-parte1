@@ -1,3 +1,4 @@
+# Sebastian Catillejo y Rafael Moreno
 # Snake Race — ARSW Lab #2 (Java 21, Virtual Threads)
 
 **Escuela Colombiana de Ingeniería – Arquitecturas de Software**  
@@ -22,9 +23,9 @@ mvn -q -DskipTests exec:java -Dsnakes=4
 
 - `-Dsnakes=N` → inicia el juego con **N** serpientes (por defecto 2).
 - **Controles**:
-  - **Flechas**: serpiente **0** (Jugador 1).
-  - **WASD**: serpiente **1** (si existe).
-  - **Espacio** o botón **Action**: Pausar / Reanudar.
+- **Flechas**: serpiente **0** (Jugador 1).
+- **WASD**: serpiente **1** (si existe).
+- **Espacio** o botón **Action**: Pausar / Reanudar.
 
 ---
 
@@ -224,6 +225,106 @@ grandes, no porque un hilo trabaje más lento.
 - Si habilitas **teleports** y **turbo**, verifica que las reglas no introduzcan carreras.
 
 > Entregables detallados más abajo.
+
+### Uso de hilos
+
+Cada serpiente vive en su propio `SnakeRunner`, lanzado con
+`Executors.newVirtualThreadPerTaskExecutor()`. En el ciclo, el runner decide si
+gira, llama `board.step(snake)` y duerme 80 ms (40 ms si tiene turbo). El
+`GameClock` no mueve nada: cada 60 ms pide un `repaint()` en el hilo de Swing.
+La autonomía sale de ahí. El problema es que los N runners y la UI comparten el
+tablero y el cuerpo de cada serpiente.
+
+### Condiciones de carrera
+
+1. **La pausa no pausaba las serpientes.** El botón `Action` solo hacía
+   `clock.pause()`. El reloj dejaba de pintar, pero los runners seguían en su
+   `while` con `Thread.sleep`. El juego se movía “a ciegas”.
+2. **Cuerpo de la serpiente.** El runner hace `advance()` y Swing hace
+   `snapshot()` al pintar, sobre el mismo `ArrayDeque`. Sin exclusión mutua se
+   ve un cuerpo a medias (*tearing*) o sale `ConcurrentModificationException`.
+3. **Tablero.** Varios runners pueden comer el mismo ratón, pisar el mismo
+   turbo o meter un obstáculo a la vez. El starter ya tenía `step()` y los
+   getters `synchronized` (y los getters devuelven copia). Eso se dejó.
+4. **El juego arrancaba solo.** Pedían Iniciar / Pausar / Reanudar, pero el
+   constructor ya lanzaba hilos y reloj.
+
+Las reglas piden **rebote** contra el obstáculo; el punto 3 pide la serpiente
+que **primero murió**. Se dejó el rebote (`HIT_OBSTACLE` → `randomTurn()`).
+Mueren solo si la cabeza cae en su propio cuerpo. Si todavía no ha pasado, al
+pausar sale que no ha muerto ninguna.
+
+### Colecciones no seguras
+
+- `Snake.body` era un `ArrayDeque` leído y escrito desde dos hilos. Se protegió
+  con métodos `synchronized` sobre la serpiente (`head`, `snapshot`, `advance`,
+  `die`). El lock cubre esa cola, no el tablero entero. `direction` se dejó
+  `volatile` porque es un solo campo; `turn()` no toca el cuerpo.
+- `mice`, `obstacles`, `turbo` y `teleports` son `HashSet` / `HashMap`. No hace
+  falta cambiarlos a `ConcurrentHashMap` si todo el acceso ya pasa por
+  `step()` / getters sincronizados.
+- El `ArrayList` de serpientes en `SnakeApp` se llena en el constructor, antes
+  de lanzar hilos, y después solo se lee. No se sincronizó.
+
+### Ausencia de espera activa
+
+No había un `while (paused) { }` girando. Lo más cercano: el `GameClock` seguía
+disparando el tick cada 60 ms y lo ignoraba si estaba en `PAUSED`. Eso no come
+CPU de verdad (el scheduler duerme), pero las serpientes ni se enteraban.
+
+La pausa real se hizo igual que en la Parte I: un `PauseControl` compartido,
+`wait()` / `notifyAll()`, `while (paused)` para no perder despertadas. Los
+runners bloqueados están fuera de la cola de ejecución. El reloj, al pausar,
+deja de pedir `repaint`.
+
+### Regiones críticas (alcance mínimo)
+
+- **Monitor `PauseControl`:** un solo lock para Iniciar / Pausar / Reanudar.
+  Empieza en pausa, para que Iniciar sea Iniciar de verdad. Cada runner llama
+  `awaitIfPaused()` al inicio de su vuelta.
+- **`Board.step(...)`:** un lock sobre el tablero. Ahí se miran obstáculo,
+  ratón, turbo y teleport, y se mutan esos conjuntos. `snake.advance()` se llama
+  adentro de ese lock a propósito: comer y crecer quedan atómicos respecto a
+  otro `step()`. Orden de locks: siempre board y después snake. El pintado toma
+  copias del board (entra y sale del lock) y luego hace `snapshot()` de cada
+  snake, así que no se cruzan y no hay deadlock.
+- **Cada `Snake`:** solo el `ArrayDeque` del cuerpo. No se envolvió el juego
+  entero en un `synchronized`.
+
+Teleports y turbo quedan cubiertos por el mismo `step()`: dos serpientes no
+pueden “comerse” el mismo rayo a la vez ni ver el mapa a medio actualizar.
+
+### Pausa / reanudar y estadísticas
+
+La suspensión no es instantánea: pausar no corta el `step()` que ya iba. El
+runner termina el movimiento (o el `sleep`) y en la siguiente
+`awaitIfPaused()` se duerme. Si se leyeran las stats en el click, alguna
+serpiente todavía estaría a mitad de avance.
+
+`PauseControl` cuenta `running` (hilos que siguen vivos) y `parked` (hilos que
+ya están en `wait()`). `awaitQuiescent()` espera `parked >= running`. Recién
+ahí Swing arma el texto:
+
+- **Viva más larga:** entre las que `isAlive()`, la de mayor `length()`.
+- **Peor:** entre las muertas, la de menor `deathMillis()`.
+
+El botón pasa por Iniciar → Pausar → Reanudar. Espacio hace lo mismo. El id de
+cada serpiente se pinta en la cabeza para cruzarlo con la barra de abajo.
+
+### Ejecución
+
+```bash
+mvn -q -DskipTests exec:java
+mvn -q -DskipTests exec:java -Dsnakes=20
+```
+
+Con el default (2) se ven mejor las stats. Con 20, sin el `synchronized` del
+cuerpo el pintado revienta; con los locks de arriba no debería salir
+`ConcurrentModificationException` ni trabarse. Las muertas se pintan grises.
+
+Al pausar, la barra inferior muestra la viva más larga y la peor. Si se pausa
+muy pronto puede decir que todavía no muere ninguna; para ver la peor hay que
+esperar a que una se pliegue sobre sí misma (el obstáculo naranja solo rebota).
 
 ---
 
